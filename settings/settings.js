@@ -92,7 +92,9 @@ function extractURLHost(url) {
         url = "http://" + url;
     }
     const newUrl = new URL(url);
-    return newUrl.host;
+    // Return hostname (without port) — declarativeNetRequest's excludedInitiatorDomains
+    // requires plain domain names, not host:port strings.
+    return newUrl.hostname;
 }
 
 // Allowlist add form bindings

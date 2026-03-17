@@ -1,94 +1,114 @@
 import { getItemFromLocal, setItemInLocal, modifyItemInLocal,
     addBlockedPortToHost, addBlockedTrackingHost, increaseBadge } from "./global/BrowserStorageManager.js";
 
-async function startup(){
-    // No need to check and initialize notification, state, and allow list values as they will 
-    // fall back to the default values until explicitly set
-    console.log("Startup called");
+// Rule IDs for the dynamic declarativeNetRequest blocking rules
+const RULE_IDS = Object.freeze({
+    LOOPBACK:       1,  // 127.x.x.x
+    NULL_IP:        2,  // 0.0.0.0
+    CLASS_A:        3,  // 10.x.x.x
+    LOCALHOST:      4,  // localhost
+    CLASS_B_172:    5,  // 172.16–31.x.x
+    CLASS_C:        6,  // 192.168.x.x
+    LINK_LOCAL:     7,  // 169.254.x.x
+    THREATMETRIX:   8,  // *.online-metrix.net
+});
 
-	// Get the blocking state from cold storage
-    const state = await getItemFromLocal("blocking_enabled", true); 
-	if (state === true) {
-	    start();
-	} else {
-	    stop();
-	}
+/**
+ * Build the full set of blocking rules, injecting the current allowlist as
+ * `excludedInitiatorDomains` so those origins are never blocked.
+ *
+ * @param {string[]} allowed_domains Hostnames that should bypass blocking
+ * @returns {chrome.declarativeNetRequest.Rule[]}
+ */
+function buildRules(allowed_domains = []) {
+    // declarativeNetRequest rejects an empty excludedInitiatorDomains array
+    const excluded = allowed_domains.length > 0
+        ? { excludedInitiatorDomains: allowed_domains }
+        : {};
+
+    const thirdPartyBase = {
+        domainType: "thirdParty",
+        isUrlFilterCaseSensitive: false,
+        ...excluded,
+    };
+
+    return [
+        {   // 127.x.x.x  (loopback)
+            id: RULE_IDS.LOOPBACK, priority: 1,
+            action: { type: "block" },
+            condition: { ...thirdPartyBase, regexFilter: "^[^:]+://127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}(/|:|$)" }
+        },
+        {   // 0.0.0.0
+            id: RULE_IDS.NULL_IP, priority: 1,
+            action: { type: "block" },
+            condition: { ...thirdPartyBase, regexFilter: "^[^:]+://0\\.0\\.0\\.0(/|:|$)" }
+        },
+        {   // 10.x.x.x  (RFC-1918 class A)
+            id: RULE_IDS.CLASS_A, priority: 1,
+            action: { type: "block" },
+            condition: { ...thirdPartyBase, regexFilter: "^[^:]+://10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}(/|:|$)" }
+        },
+        {   // localhost
+            id: RULE_IDS.LOCALHOST, priority: 1,
+            action: { type: "block" },
+            condition: { ...thirdPartyBase, regexFilter: "^[^:]+://localhost(/|:|$)" }
+        },
+        {   // 172.16–31.x.x  (RFC-1918 class B)
+            id: RULE_IDS.CLASS_B_172, priority: 1,
+            action: { type: "block" },
+            condition: { ...thirdPartyBase, regexFilter: "^[^:]+://172\\.(1[6-9]|2[0-9]|3[01])\\.\\d{1,3}\\.\\d{1,3}(/|:|$)" }
+        },
+        {   // 192.168.x.x  (RFC-1918 class C)
+            id: RULE_IDS.CLASS_C, priority: 1,
+            action: { type: "block" },
+            condition: { ...thirdPartyBase, regexFilter: "^[^:]+://192\\.168\\.\\d{1,3}\\.\\d{1,3}(/|:|$)" }
+        },
+        {   // 169.254.x.x  (link-local / APIPA)
+            id: RULE_IDS.LINK_LOCAL, priority: 1,
+            action: { type: "block" },
+            condition: { ...thirdPartyBase, regexFilter: "^[^:]+://169\\.254\\.\\d{1,3}\\.\\d{1,3}(/|:|$)" }
+        },
+        {   // *.online-metrix.net  (ThreatMetrix / LexisNexis)
+            // Replaces the Firefox-only browser.dns.resolve() CNAME check
+            id: RULE_IDS.THREATMETRIX, priority: 1,
+            action: { type: "block" },
+            condition: {
+                ...thirdPartyBase,
+                requestDomains: ["online-metrix.net"],
+            }
+        },
+    ];
 }
 
-// This regex is explained here https://regex101.com/r/LSL180/1 below I needed to change \b -> \\b
-const local_filter = new RegExp("\\b(^(http|https|wss|ws|ftp|ftps):\/\/127[.](?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)[.](?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)[.](?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|^(http|https|wss|ws|ftp|ftps):\/\/0.0.0.0|^(http|https|wss|ws|ftp|ftps):\/\/(10)([.](25[0-5]|2[0-4][0-9]|1[0-9]{1,2}|[0-9]{1,2})){3}|^(http|https|wss|ws|ftp|ftps):\/\/localhost|^(http|https|wss|ws|ftp|ftps):\/\/172[.](0?16|0?17|0?18|0?19|0?20|0?21|0?22|0?23|0?24|0?25|0?26|0?27|0?28|0?29|0?30|0?31)[.](?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)[.](?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|^(http|https|wss|ws|ftp|ftps):\/\/192[.]168[.](?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)[.](?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|^(http|https|wss|ws|ftp|ftps):\/\/169[.]254[.](?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)[.](?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))(?:\/([789]|1?[0-9]{2}))?\\b", "i");
-// Create a regex to find all sub-domains for online-metrix.net  Explained here https://regex101.com/r/f8LSTx/2
-const thm = new RegExp("online-metrix[.]net$", "i");
+async function startup() {
+    console.log("Startup called");
 
-async function cancel(requestDetails) {
-    // First check if it's a same-origin request
-    if(!requestDetails.thirdParty) {
-        console.debug("Same-origin/first-party request allowed:", {origin: requestDetails.originUrl, request: requestDetails.url});
-        return { cancel: false };
+    // Use Chrome's built-in per-tab rule-match counter as the badge text.
+    // This replaces the manual badge updates that relied on webRequest callbacks.
+    await chrome.declarativeNetRequest.setExtensionActionOptions({
+        displayActionCountAsBadgeText: true,
+    });
+
+    // Get the blocking state from cold storage
+    const state = await getItemFromLocal("blocking_enabled", true);
+    if (state === true) {
+        await start();
+    } else {
+        await stop();
     }
-
-
-    // Then check the allowlist
-    let check_allowed_url;
-    try {
-        check_allowed_url = new URL(requestDetails.originUrl);
-    } catch(error) {
-        console.error("Aborted filtering on domain due to unparseable originUrl: ", requestDetails.originUrl, error);
-        return { cancel: false }; // invalid origin
-    }
-    const allowed_domains_list = await getItemFromLocal("allowed_domain_list", []);
-    // Perform an exact match against the whitelisted domains (dont assume subdomains are allowed)
-    const domainIsWhiteListed = allowed_domains_list.some(
-        (domain) => check_allowed_url.host === domain
-    );
-    if (domainIsWhiteListed){
-        console.debug("Aborted filtering on domain due to whitelist: ", check_allowed_url);
-        return { cancel: false };
-    }
-
-    // Used in both local and threatmetrix checks
-    let url;
-    try {
-        url = new URL(requestDetails.url);
-    } catch(error) {
-        console.error("Error filtering on domain due to unparseable request URL: ", requestDetails.url, error);
-    }
-
-
-    // Local request check
-    if (local_filter.test(requestDetails.url)) {
-        // The network request is going to a local address and has already failed a same-origin check, block it
-        console.debug("Blocking domain for portscanning: ", url);
-        increaseBadge(requestDetails, false); // increment badge and alert
-        addBlockedPortToHost(url, requestDetails.tabId);
-        return { cancel: true };
-    }
-
-    // The early return in the if case above makes sure we are not searching the CNAME of local addresses
-    // Send a request to get the CNAME of the webrequest
-    const resolving = await browser.dns.resolve(url.host, ["canonical_name"]);
-    // If the CNAME redirects to a online-metrix.net domain -> Block
-    if (thm.test(resolving.canonicalName)) {
-        console.debug("Blocking domain for being a threatmetrix match: ", {url: url, cname: resolving.canonicalName});
-        increaseBadge(requestDetails, true); // increment badge and alert
-        addBlockedTrackingHost(url, requestDetails.tabId);
-        return { cancel: true };
-    }
-    
-    // Dont block sites that don't alert the detection
-    return { cancel: false };
-} // end cancel()
+}
 
 async function start() {  // Enables blocking
     try {
-        //Add event listener
-        browser.webRequest.onBeforeRequest.addListener(
-            cancel,
-            { urls: ["<all_urls>"] }, // Match all HTTP, HTTPS, FTP, FTPS, WS, WSS URLs.
-            ["blocking"] // if cancel() returns true block the request.
-        );
+        const allowed_domains = await getItemFromLocal("allowed_domain_list", []);
+        const rules = buildRules(allowed_domains);
 
-        console.log("Attached `onBeforeRequest` listener successfully: blocking enabled");
+        await chrome.declarativeNetRequest.updateDynamicRules({
+            removeRuleIds: Object.values(RULE_IDS),
+            addRules: rules,
+        });
+
+        console.log("Dynamic blocking rules added: blocking enabled");
         await setItemInLocal("blocking_enabled", true);
     } catch (e) {
         console.error("START() ", e);
@@ -97,35 +117,26 @@ async function start() {  // Enables blocking
 
 async function stop() {  // Disables blocking
     try {
-        //Remove event listener
-        browser.webRequest.onBeforeRequest.removeListener(cancel);
+        await chrome.declarativeNetRequest.updateDynamicRules({
+            removeRuleIds: Object.values(RULE_IDS),
+        });
 
-        console.log("Removed `onBeforeRequest` listener successfully: blocking disabled");
+        console.log("Dynamic blocking rules removed: blocking disabled");
         await setItemInLocal("blocking_enabled", false);
     } catch (e) {
         console.error("STOP() ", e);
     }
 }
 
-async function isListening() { // returns if blocking is on
-    const storage_state = await getItemFromLocal("blocking_enabled", true);
-    const listener_attached_state = browser.webRequest.onBeforeRequest.hasListener(cancel);
-
-    // If storage says that blocking is enabled when it actually isn't, soft throw an error to the console
-    if (storage_state !== listener_attached_state) {
-        console.error("Mismatch in blocking state according to storage value and listener attached status:", {
-            storage_state,
-            listener_attached_state
-        });
-    }
-
-    // Rely on the actual listener being attached as the ground source of truth over what storage says
-    return listener_attached_state;
+async function isListening() {  // Returns true when blocking rules are active
+    // Storage is always updated in sync with rule additions/removals by start()/stop(),
+    // so it is the reliable source of truth without needing to enumerate dynamic rules.
+    return getItemFromLocal("blocking_enabled", true);
 }
 
 /**
- * Call by each tab is updated.
- * And if url has changed.
+ * Called by each tab update.
+ * Clears per-tab blocked-port and blocked-host data when the tab navigates.
  * Borrowed and modified from https://gitlab.com/KevinRoebert/ClearUrls/-/blob/master/core_js/badgedHandler.js
  */
 async function handleUpdated(tabId, changeInfo, tabInfo) {
@@ -157,13 +168,8 @@ async function handleUpdated(tabId, changeInfo, tabInfo) {
     }
 }
 
-const extensionOrigin = new URL(browser.runtime.getURL("")).origin;
+const extensionOrigin = new URL(chrome.runtime.getURL("")).origin;
 async function onMessage(message, sender) {
-    // Add origin check for security (preemptively accepting messages from any extension page/script in advance of potential `settings.js` rewrite)
-    /* TODO Potentially remove, pretty sure this isn't needed:
-       https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/runtime/onMessage#:~:text=from%20another%20part%20of%20your%20extension
-       https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/runtime/onMessageExternal
-    */
     if (sender.origin !== extensionOrigin) {
         console.warn('Message from unexpected origin:', sender.url);
         return;
@@ -178,8 +184,52 @@ async function onMessage(message, sender) {
             break;
     }
 }
-browser.runtime.onMessage.addListener(onMessage);
+chrome.runtime.onMessage.addListener(onMessage);
+
+// When the allowed_domain_list changes (e.g. from the settings page), rebuild
+// the blocking rules so the new allowlist is reflected immediately.
+chrome.storage.onChanged.addListener(async (changes, area) => {
+    if (area !== 'local' || !changes['allowed_domain_list']) return;
+    const blocking_enabled = await getItemFromLocal("blocking_enabled", true);
+    if (blocking_enabled) {
+        await start();
+    }
+});
+
+// onRuleMatchedDebug is only available for unpacked (developer-mode) extensions.
+// It fires whenever a declarativeNetRequest rule matches a request and allows us
+// to populate the popup's blocked-ports / blocked-hosts lists and show notifications.
+// NOTE: In a packed (production) extension this listener is absent; blocking still
+// works via declarativeNetRequest, and the badge is auto-updated by Chrome's built-in
+// rule-match counter (setExtensionActionOptions above), but the detailed popup list
+// and first-block notifications will be unavailable.
+if (chrome.declarativeNetRequest.onRuleMatchedDebug) {
+    chrome.declarativeNetRequest.onRuleMatchedDebug.addListener(
+        async ({ request, rule }) => {
+            if (!request || request.tabId === -1) return;
+
+            const isThreatMetrix = rule.ruleId === RULE_IDS.THREATMETRIX;
+            let url;
+            try {
+                url = new URL(request.url);
+            } catch (e) {
+                console.error("Error parsing blocked request URL:", request.url, e);
+                return;
+            }
+
+            // increaseBadge handles per-tab first-block notification logic and
+            // storage tracking. The badge TEXT itself is auto-managed by Chrome's
+            // rule-match counter (chrome.action.setBadgeText calls are overridden).
+            await increaseBadge(request, isThreatMetrix);
+            if (isThreatMetrix) {
+                await addBlockedTrackingHost(url, request.tabId);
+            } else {
+                await addBlockedPortToHost(url, request.tabId);
+            }
+        }
+    );
+}
 
 startup();
 // Call by each tab is updated.
-browser.tabs.onUpdated.addListener(handleUpdated);
+chrome.tabs.onUpdated.addListener(handleUpdated);

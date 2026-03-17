@@ -2,14 +2,14 @@ import { getItemFromLocal, setItemInLocal } from "../global/BrowserStorageManage
 
 // Can attach settings page link instantly, no state reading needed
 document.getElementById('settings').addEventListener("click", () =>
-    browser.runtime.openOptionsPage());
+    chrome.runtime.openOptionsPage());
 
 // Blocking switch state bindings (wrapped in `.then()` to allow for parallel setup of notifications switch)
 const blocking_switch = document.getElementById("blocking_switch");
 const blocking_setup = getItemFromLocal("blocking_enabled", true).then((blocking_enabled) => {
     blocking_switch.checked = blocking_enabled;
     blocking_switch.addEventListener("change", (ev) =>
-        browser.runtime.sendMessage({
+        chrome.runtime.sendMessage({
             type: 'toggleEnabled',
             value: ev.target.checked
         }));

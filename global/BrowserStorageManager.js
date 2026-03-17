@@ -28,7 +28,7 @@ const STORAGE_LOCK_KEY = "port_authority_storage_lock";
 async function UNLOCKED_getItemFromLocal(key, default_value) {
     let storage_value;
     try {
-        storage_value = await browser.storage.local.get(key);
+        storage_value = await chrome.storage.local.get(key);
 
         // Objects not in storage return an empty object and don't need to be parsed as JSON
         if(Object.keys(storage_value).length === 0) {
@@ -91,7 +91,7 @@ export async function setItemInLocal(key, value) {
 
     // Acquire lock for write access before updating
     return navigator.locks.request(STORAGE_LOCK_KEY, async (lock) => {
-        await browser.storage.local.set({ [key]: stringifiedValue });
+        await chrome.storage.local.set({ [key]: stringifiedValue });
         console.debug("Setting storage:", {[key]: value});
         return value;
     });
@@ -138,7 +138,7 @@ export async function modifyItemInLocal(key, default_value, mutate) {
         const new_value = await mutate(initial_value);
 
         // Re-stringify and save the changed value
-        await browser.storage.local.set({
+        await chrome.storage.local.set({
             [key]: JSON.stringify(new_value)
         }); 
 
@@ -187,8 +187,8 @@ export async function clearItemsInLocal(default_structure = {}) {
 
     // Acquire lock for write access before clearing
     return navigator.locks.request(STORAGE_LOCK_KEY, async (lock) => {
-        await browser.storage.local.clear();
-        await browser.storage.local.set(
+        await chrome.storage.local.clear();
+        await chrome.storage.local.set(
             default_structure_stringified
         );
 
@@ -291,10 +291,20 @@ export async function increaseBadge(request, isThreatMetrix) {
         const notifications_enabled = await UNLOCKED_getItemFromLocal("notificationsAllowed", true);
         if (badges[tabId].alerted === 0 && notifications_enabled) {
             badges[tabId].alerted += 1;
+            // Chrome's declarativeNetRequest uses `initiator`; Firefox webRequest used `originUrl`
+            const originUrl = request.initiator || request.originUrl;
+            let originHost = null;
+            if (originUrl && originUrl !== 'null') {
+                try {
+                    originHost = new URL(originUrl).host;
+                } catch (e) {
+                    console.warn("Could not parse origin URL for notification:", originUrl);
+                }
+            }
             if (isThreatMetrix) {
-                notifyThreatMetrix(new URL(request.originUrl).host);
+                notifyThreatMetrix(originHost);
             } else {
-                notifyPortScanning(new URL(request.originUrl).host);
+                notifyPortScanning(originHost);
             }
         }
 
